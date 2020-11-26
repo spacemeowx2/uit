@@ -9,11 +9,3 @@ edition = "2018"
 [dependencies]
 anyhow = "1.0"
 tokio = { version = "0.3", features = [ "full" ] }
-
-[[bin]]
-name = "client"
-path = "src/client.rs"
-
-[[bin]]
-name = "server"
-path = "src/server.rs"
