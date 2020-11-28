@@ -1,69 +1,62 @@
 use structopt::StructOpt;
-use futures::{io::{AsyncRead, AsyncWrite}, stream::{Stream, StreamExt, FuturesUnordered}, future::{select, Either}};
-use std::io;
+use futures::{io::{AsyncRead, AsyncWrite}, stream::{Stream, TryStreamExt}, sink::Sink};
+use std::{io, marker::PhantomData, net::SocketAddr, pin::Pin};
+use spawn::with_spawn;
+use traits::*;
 
-pub trait AsyncStream: AsyncRead + AsyncWrite {
-
-}
-impl<T> AsyncStream for T
-where
-    T: AsyncRead + AsyncWrite,
-{}
+mod integrations;
+mod spawn;
+mod traits;
 
 #[derive(StructOpt)]
 struct ServerOpt {
 
 }
 
-struct Server<TcpStream, TcpListener>
+pub struct Server<RT>
 where
-    TcpListener: Stream<Item = io::Result<TcpStream>> + Unpin,
-    TcpStream: AsyncStream,
+    RT: AsyncRuntime,
 {
-    listener: TcpListener
+    listener: RT::TcpListener,
+    _stream: PhantomData<RT>,
 }
 
-impl<TcpStream, TcpListener> Server<TcpStream, TcpListener>
+impl<RT> Server<RT>
 where
-    TcpListener: Stream<Item = io::Result<TcpStream>> + Unpin,
-    TcpStream: AsyncStream,
+    RT: AsyncRuntime,
 {
-
-    async fn handle(_s: TcpStream)
+    async fn new(addr: SocketAddr) -> io::Result<Self> {
+        let listener = RT::bind_tcp(addr).await?;
+        Ok(Self {
+            listener,
+            _stream: PhantomData,
+        })
+    }
+    async fn handle(_s: RT::TcpStream)
     {
         log::trace!("Connection end");
     }
     async fn run(mut self) -> io::Result<()> {
-        let mut tasks = FuturesUnordered::new();
-        loop {
-            let result = if tasks.len() > 0 {
-                match select(self.listener.next(), tasks.next()).await {
-                    Either::Left((Some(result), _)) => result,
-                    Either::Right(_) => continue,
-                    _ => break,
-                }
-            } else {
-                match self.listener.next().await {
-                    Some(result) => result,
-                    _ => break,
-                }
-            };
-            log::trace!("Incoming tcp stream");
-            let stream = result?;
-            tasks.push(Self::handle(stream))
-        };
-        Ok(())
+        with_spawn(|s| async move {
+            while let Some(stream) = self.listener.try_next().await? {
+                s.spawn(Self::handle(stream));
+            }
+            Ok(())
+        }).await
     }
 }
 
-pub async fn server_main<TcpStream, TcpListener>(listener: TcpListener) -> io::Result<()>
-where
-    TcpListener: Stream<Item = io::Result<TcpStream>> + Unpin,
-    TcpStream: AsyncStream,
-{
-    Server {
-        listener
-    }.run().await
+pub async fn server_main() -> io::Result<()> {
+    use tokio::{select, signal::ctrl_c};
+
+    let server = Server::<integrations::TokioRuntime>::new("0.0.0.0:12342".parse().unwrap()).await?;
+
+    select! {
+        r = ctrl_c() => r?,
+        r = server.run() => r?,
+    };
+
+    Ok(())
 }
 
 pub async fn client_main() -> io::Result<()> {
